@@ -11,10 +11,17 @@ import time
 import yaml
 from datetime import datetime, timedelta
 
-BEAT_REQUIRED_FIELDS = ["@timestamp", "type",
+from .compose import ComposeMixin
+
+
+BEAT_REQUIRED_FIELDS = ["@timestamp",
                         "beat.name", "beat.hostname", "beat.version"]
 
 INTEGRATION_TESTS = os.environ.get('INTEGRATION_TESTS', False)
+
+
+class TimeoutError(Exception):
+    pass
 
 
 class Proc(object):
@@ -97,7 +104,7 @@ class Proc(object):
             pass
 
 
-class TestCase(unittest.TestCase):
+class TestCase(unittest.TestCase, ComposeMixin):
 
     @classmethod
     def setUpClass(self):
@@ -116,6 +123,13 @@ class TestCase(unittest.TestCase):
         # Create build path
         build_dir = self.beat_path + "/build"
         self.build_path = build_dir + "/system-tests/"
+
+        # Start the containers needed to run these tests
+        self.compose_up()
+
+    @classmethod
+    def tearDownClass(self):
+        self.compose_down()
 
     def run_beat(self,
                  cmd=None,
@@ -163,7 +177,8 @@ class TestCase(unittest.TestCase):
                 "-systemTest",
                 "-test.coverprofile",
                 os.path.join(self.working_dir, "coverage.cov"),
-                "-c", os.path.join(self.working_dir, config)
+                "-path.home", os.path.normpath(self.working_dir),
+                "-c", os.path.join(self.working_dir, config),
                 ]
 
         if logging_args:
@@ -193,7 +208,7 @@ class TestCase(unittest.TestCase):
         kargs["beat"] = self
         output_str = template.render(**kargs)
         with open(os.path.join(self.working_dir, output), "wb") as f:
-            f.write(output_str)
+            f.write(output_str.encode('utf8'))
 
     # Returns output as JSON object with flattened fields (. notation)
     def read_output(self,
@@ -234,7 +249,9 @@ class TestCase(unittest.TestCase):
                     # hit EOF
                     break
 
-                jsons.append(json.loads(line))
+                event = json.loads(line)
+                del event['@metadata']
+                jsons.append(event)
         return jsons
 
     def copy_files(self, files, source_dir="files/"):
@@ -254,6 +271,11 @@ class TestCase(unittest.TestCase):
         if os.path.exists(self.working_dir):
             shutil.rmtree(self.working_dir)
         os.makedirs(self.working_dir)
+
+        fields_yml = os.path.join(self.beat_path, "fields.yml")
+        # Only add it if it exists
+        if os.path.isfile(fields_yml):
+            shutil.copyfile(fields_yml, os.path.join(self.working_dir, "fields.yml"))
 
         try:
             # update the last_run link
@@ -278,9 +300,8 @@ class TestCase(unittest.TestCase):
         start = datetime.now()
         while not cond():
             if datetime.now() - start > timedelta(seconds=max_timeout):
-                raise Exception("Timeout waiting for '{}' to be true. "
-                                .format(name) +
-                                "Waited {} seconds.".format(max_timeout))
+                raise TimeoutError("Timeout waiting for '{}' to be true. ".format(name) +
+                                   "Waited {} seconds.".format(max_timeout))
             time.sleep(poll_interval)
 
     def get_log(self, logfile=None):
@@ -294,6 +315,15 @@ class TestCase(unittest.TestCase):
             data = f.read()
 
         return data
+
+    def wait_log_contains(self, msg, logfile=None,
+                          max_timeout=10, poll_interval=0.1,
+                          name="log_contains"):
+        self.wait_until(
+            cond=lambda: self.log_contains(msg, logfile),
+            max_timeout=max_timeout,
+            poll_interval=poll_interval,
+            name=name)
 
     def log_contains(self, msg, logfile=None):
         """
@@ -350,6 +380,16 @@ class TestCase(unittest.TestCase):
         except IOError:
             return False
 
+    def output_has_message(self, message, output_file=None):
+        """
+        Returns true if the output has the given message field.
+        """
+        try:
+            return any(line for line in self.read_output(output_file=output_file, required_fields=["message"])
+                       if line.get("message") == message)
+        except (IOError, TypeError):
+            return False
+
     def all_have_fields(self, objs, fields):
         """
         Checks that the given list of output objects have
@@ -378,7 +418,9 @@ class TestCase(unittest.TestCase):
         """
         for o in objs:
             for key in o.keys():
-                if key not in dict_fields and key not in expected_fields:
+                known = key in dict_fields or key in expected_fields
+                ismeta = key.startswith('@metadata.')
+                if not(known or ismeta):
                     raise Exception("Unexpected key '{}' found"
                                     .format(key))
 
@@ -425,7 +467,9 @@ class TestCase(unittest.TestCase):
 
         # TODO: Make fields_doc path more generic to work with beat-generator
         with open(fields_doc, "r") as f:
-            path = os.path.abspath(os.path.dirname(__file__) + "../../../../_meta/fields.common.yml")
+            path = os.path.abspath(os.path.dirname(__file__) + "../../../../_meta/fields.generated.yml")
+            if not os.path.isfile(path):
+                path = os.path.abspath(os.path.dirname(__file__) + "../../../../_meta/fields.common.yml")
             with open(path) as f2:
                 content = f2.read()
 

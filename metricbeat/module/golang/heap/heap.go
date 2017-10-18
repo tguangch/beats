@@ -2,13 +2,15 @@ package heap
 
 import (
 	"encoding/json"
+	"runtime"
+
 	"github.com/elastic/beats/libbeat/common"
+	"github.com/elastic/beats/libbeat/common/cfgwarn"
 	"github.com/elastic/beats/libbeat/logp"
 	"github.com/elastic/beats/metricbeat/helper"
 	"github.com/elastic/beats/metricbeat/mb"
 	"github.com/elastic/beats/metricbeat/mb/parse"
 	"github.com/elastic/beats/metricbeat/module/golang"
-	"runtime"
 )
 
 const (
@@ -46,8 +48,7 @@ type MetricSet struct {
 // Part of new is also setting up the configuration by processing additional
 // configuration entries if needed.
 func New(base mb.BaseMetricSet) (mb.MetricSet, error) {
-
-	logp.Warn("EXPERIMENTAL: The golang heap metricset is experimental")
+	cfgwarn.Experimental("The golang heap metricset is experimental")
 
 	return &MetricSet{
 		BaseMetricSet: base,
@@ -59,7 +60,6 @@ func New(base mb.BaseMetricSet) (mb.MetricSet, error) {
 // It returns the event which is then forward to the output. In case of an error, a
 // descriptive error must be returned.
 func (m *MetricSet) Fetch() (common.MapStr, error) {
-
 	data, err := m.http.FetchContent()
 	if err != nil {
 		return nil, err
